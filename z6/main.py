@@ -1,95 +1,105 @@
+import math
 import cv2
 import mediapipe as mp
 
+"""
+Implementacja:
+- Adam Jurkiewicz
+- Sylwester Kąkol
+
+Prototyp maszyny do gry w "Baba Jaga patrzy"
+    Wybrane funkcjonalności:
+
+    - Narysować celownik na twarzy celu
+    - Nie strzelać gdy uczestnik się poddaje
+"""
+
+def get_angle(vertice1, vertice2, vertice3):
+    """
+    Zwraca kąt pomiędzy trzema punktami.
+    """
+    x1, y1, _ = vertice1
+    x2, y2, _ = vertice2
+    x3, y3, _ = vertice3
+
+    angle = math.degrees(math.atan2(y3 - y2, x3 - x2) - math.atan2(y1 - y2, x1 - x2))
+    if angle < 0:
+        angle += 360
+
+    return angle
+
+
+"""
+Plik XML zawierający strukturę rysowanego celownika/okręgu. 
+"""
+face_cascade = cv2.CascadeClassifier(
+    './haarcascade_frontalface_default.xml'
+)
+
 mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
-mp_hands = mp.solutions.hands
+mp_styles = mp.solutions.drawing_styles
+mp_pose = mp.solutions.pose
+camera = cv2.VideoCapture(0)
 
-face_filter = cv2.CascadeClassifier("face_detector.xml")
-
-
-# For static images:
-IMAGE_FILES = []
-with mp_hands.Hands(
-        static_image_mode=True,
-        max_num_hands=2,
-        min_detection_confidence=0.5) as hands:
-    for idx, file in enumerate(IMAGE_FILES):
-        # Read an image, flip it around y-axis for correct handedness output (see
-        # above).
-        image = cv2.flip(cv2.imread(file), 1)
-        # Convert the BGR image to RGB before processing.
-        results = hands.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-
-        # Print handedness and draw hand landmarks on the image.
-        print('Handedness:', results.multi_handedness)
-        if not results.multi_hand_landmarks:
-            continue
-        image_height, image_width, _ = image.shape
-        annotated_image = image.copy()
-        for hand_landmarks in results.multi_hand_landmarks:
-            print('hand_landmarks:', hand_landmarks)
-            print(
-                f'Index finger tip coordinates: (',
-                f'{hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP].x * image_width}, '
-                f'{hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP].y * image_height})'
-            )
-            mp_drawing.draw_landmarks(
-                annotated_image,
-                hand_landmarks,
-                mp_hands.HAND_CONNECTIONS,
-                mp_drawing_styles.get_default_hand_landmarks_style(),
-                mp_drawing_styles.get_default_hand_connections_style())
-        cv2.imwrite(
-            '/tmp/annotated_image' + str(idx) + '.png', cv2.flip(annotated_image, 1))
-        # Draw hand world landmarks.
-        if not results.multi_hand_world_landmarks:
-            continue
-        for hand_world_landmarks in results.multi_hand_world_landmarks:
-            mp_drawing.plot_landmarks(
-                hand_world_landmarks, mp_hands.HAND_CONNECTIONS, azimuth=5)
-
-# For webcam input:
-cap = cv2.VideoCapture(0)
-with mp_hands.Hands(
-        model_complexity=0,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5) as hands:
-    while cap.isOpened():
-        success, image = cap.read()
-        if not success:
-            print("Ignoring empty camera frame.")
-            # If loading a video, use 'break' instead of 'continue'.
+with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
+    # Odczytywanie klatek, jeśli wyskoczy błąd to kontynuujemy
+    while camera.isOpened():
+        _, frame = camera.read()
+        if not _:
             continue
 
-        gray_frame = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        face_rects = face_filter.detectMultiScale(gray_frame, 1.3, 5)
+        height, width, _ = frame.shape
+        headshot_mode = True
+        color = (0, 255, 0)
+        landmarks = []
 
-        for (x, y, w, h) in face_rects:
-            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 255), 3)
-            # for some reason it's stuck to a right-hand corner; maybe the coords are bad?
-            cv2.line(image, (0, 0), (w, h), (0, 0, 255), 3)
-            cv2.line(image, (0, h), (w, 0), (0, 0, 255), 3)
+        frame.flags.writeable = False
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_processed = pose.process(frame)
 
-        # To improve performance, optionally mark the image as not writeable to
-        # pass by reference.
-        image.flags.writeable = False
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = hands.process(image)
+        # Wyciągnięcie wartości landmarków z uwzględnieniem rozmiarów okienka
+        for landmark in mp_processed.pose_landmarks.landmark:
+            landmarks.append((int(landmark.x * width), int(landmark.y * height), int(landmark.z * width)))
 
-        # Draw the hand annotations on the image.
-        image.flags.writeable = True
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(
-                    image,
-                    hand_landmarks,
-                    mp_hands.HAND_CONNECTIONS,
-                    mp_drawing_styles.get_default_hand_landmarks_style(),
-                    mp_drawing_styles.get_default_hand_connections_style())
-        # Flip the image horizontally for a selfie-view display.
-        cv2.imshow('MediaPipe Hands', cv2.flip(image, 1))
-        if cv2.waitKey(5) & 0xFF == 27:
+        # Obliczenie kątów potrzebnych do odczytania gestu poddania się
+        left_elbow = get_angle(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value],
+                               landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value],
+                               landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value])
+
+        left_shoulder = get_angle(landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value],
+                                  landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value],
+                                  landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value])
+
+        right_elbow = get_angle(landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value],
+                                landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value],
+                                landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value])
+
+        right_shoulder = get_angle(landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value],
+                                   landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value],
+                                   landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value])
+
+        # Jeśli wyliczone uprzednio kąty mieszczą się w określonym zasięgu to nie strzelamy do celu
+        if (70 < left_elbow < 125 and 240 < right_elbow < 300) or (
+                175 < left_shoulder < 260 and 115 < right_shoulder < 190):
+            headshot_mode = False
+
+        frame.flags.writeable = True
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        face_detection = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+        # W zależnosci od tego czy cel się poddaje rysujemy albo czerwony celownik, lub zielony okrąg informujący
+        # cel, że zostanie oszczedzony
+        for (x, y, w, h) in face_detection:
+            if headshot_mode:
+                color = (0, 0, 255)
+                cv2.line(frame, (x + w // 2, y + h), (x + w // 2, y), color, 2)
+                cv2.line(frame, (x + w, y + h // 2), (x, y + h // 2), color, 2)
+            cv2.circle(frame, (x + w // 2, y + h // 2), w // 2, color, 4)
+
+        cv2.imshow('Headshot', cv2.flip(frame, 1))
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
-cap.release()
+
+camera.release()
